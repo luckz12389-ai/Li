@@ -1,0 +1,104 @@
+name: Unzip e Build Android
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'Amazon_Frontline_Complete.zip'
+      - '.github/workflows/unzip_and_build.yml'
+
+jobs:
+  unzip-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verificar ZIP
+        run: |
+          if [ ! -f Amazon_Frontline_Complete.zip ]; then
+            echo "ERRO: Amazon_Frontline_Complete.zip nao encontrado na raiz do repositorio."
+            echo "Faca upload do ZIP na raiz e rode de novo."
+            ls -la
+            exit 1
+          fi
+          ls -lh Amazon_Frontline_Complete.zip
+
+      - name: Descompactar
+        run: |
+          unzip -o Amazon_Frontline_Complete.zip
+          ls -la
+          if [ -d Amazon_Frontline ]; then
+            echo "Pasta Amazon_Frontline encontrada"
+            ls Amazon_Frontline | head
+          else
+            echo "ERRO: pasta Amazon_Frontline nao apareceu apos unzip"
+            exit 1
+          fi
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache Godot
+        id: cache-godot
+        uses: actions/cache@v4
+        with:
+          path: godot
+          key: godot-4.3-stable-linux-v2
+
+      - name: Download Godot 4.3
+        if: steps.cache-godot.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p godot
+          cd godot
+          curl -L -o godot.zip https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_linux.x86_64.zip
+          unzip -o godot.zip
+          mv Godot_v4.3-stable_linux.x86_64 godot || mv Godot_v4.3-stable_linux.x86_64.exe godot || true
+          chmod +x godot || true
+          curl -L -o templates.tpz https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz
+          mkdir -p ~/.local/share/godot/export_templates/4.3.stable
+          unzip -o templates.tpz -d /tmp/templates
+          cp -r /tmp/templates/templates/* ~/.local/share/godot/export_templates/4.3.stable/ || true
+          ls -la ~/.local/share/godot/export_templates/4.3.stable/ || true
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Licencas Android
+        run: yes | sdkmanager --licenses || true
+
+      - name: Build tools
+        run: sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" || true
+
+      - name: Exportar APK
+        working-directory: Amazon_Frontline
+        run: |
+          mkdir -p build/android
+          # keystore debug
+          if [ ! -f ../debug.keystore ]; then
+            keytool -genkeypair -v -keystore ../debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US" || true
+          fi
+          ../godot/godot --headless --path . --export-debug "Android" build/android/AmazonFrontline.apk 2>&1 | tee export.log || true
+          echo "---- conteudo build ----"
+          ls -la build/android/ || true
+          ls -la . || true
+          # se nao gerou APK, ainda sobe o log e a pasta do projeto para diagnostico
+          if [ ! -f build/android/AmazonFrontline.apk ]; then
+            echo "APK nao gerado neste runner. Enviando log e estrutura para diagnostico."
+            mkdir -p build/android
+            cp export.log build/android/ || true
+            echo "Godot Android export pode exigir configuracao extra de templates/SDK." > build/android/BUILD_NOTES.txt
+          fi
+
+      - name: Upload artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: AmazonFrontline-Android
+          path: Amazon_Frontline/build/android/
+          retention-days: 14
+          if-no-files-found: warn
