@@ -15,12 +15,12 @@ jobs:
       - name: Verificar ZIP
         run: |
           ls -la
-          test -f Amazon_Frontline_Complete.zip || { echo "ZIP nao encontrado na raiz"; exit 1; }
+          test -f Amazon_Frontline_Complete.zip || { echo "ZIP nao encontrado"; exit 1; }
 
       - name: Descompactar
         run: |
           unzip -o Amazon_Frontline_Complete.zip
-          test -d Amazon_Frontline || exit 1
+          test -d Amazon_Frontline
           ls Amazon_Frontline | head
 
       - name: Setup Java 17
@@ -29,7 +29,7 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Setup Android SDK (sem pacote tools)
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
           packages: "platform-tools platforms;android-34 build-tools;34.0.0"
@@ -39,6 +39,8 @@ jobs:
           mkdir -p "$ANDROID_HOME/licenses"
           echo -e "\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > "$ANDROID_HOME/licenses/android-sdk-license"
           echo -e "\n84831b9409646a918e30573bab4c9c91346d8abd" > "$ANDROID_HOME/licenses/android-sdk-preview-license"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME" | head
 
       - name: Download Godot 4.3 + templates
         run: |
@@ -49,39 +51,64 @@ jobs:
           BIN=$(find . -maxdepth 1 -type f -name "Godot*" | head -1)
           mv "$BIN" godot
           chmod +x godot
+          ./godot --version || true
           curl -fsSL -o templates.tpz https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz
           mkdir -p "$HOME/.local/share/godot/export_templates/4.3.stable"
           unzip -o templates.tpz -d /tmp/godot_tpl
           cp -r /tmp/godot_tpl/templates/* "$HOME/.local/share/godot/export_templates/4.3.stable/"
-          ls "$HOME/.local/share/godot/export_templates/4.3.stable/" | head
+          echo "=== Templates instalados ==="
+          ls -la "$HOME/.local/share/godot/export_templates/4.3.stable/"
 
-      - name: Configurar caminho do Android SDK no Godot
+      - name: Configurar Godot + preset Android
         run: |
           mkdir -p "$HOME/.config/godot"
-          cat > "$HOME/.config/godot/editor_settings-4.tres" << EOF
+          # settings do editor
+          cat > "$HOME/.config/godot/editor_settings-4.3.tres" << EOF
           [gd_resource type="EditorSettings" format=3]
           [resource]
           export/android/android_sdk_path = "$ANDROID_HOME"
+          export/android/debug_keystore = "$(pwd)/debug.keystore"
+          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore_pass = "android"
           EOF
-          cp "$HOME/.config/godot/editor_settings-4.tres" "$HOME/.config/godot/editor_settings-4.3.tres" || true
+          cp "$HOME/.config/godot/editor_settings-4.3.tres" "$HOME/.config/godot/editor_settings-4.tres" || true
 
-      - name: Keystore debug
-        run: |
+          # keystore
           keytool -genkeypair -v -keystore debug.keystore \
             -storepass android -alias androiddebugkey -keypass android \
             -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname "CN=Android Debug,O=Android,C=US" || true
+            -dname "CN=Android Debug,O=Android,C=US"
+
+          # Ajustar export_presets: desligar gradle (mais simples no CI) e apontar keystore
+          cd Amazon_Frontline
+          sed -i 's|gradle_build/use_gradle_build=true|gradle_build/use_gradle_build=false|g' export_presets.cfg || true
+          sed -i 's|export_path="build/android/AmazonFrontline.apk"|export_path="build/android/AmazonFrontline.apk"|g' export_presets.cfg || true
+          # garantir pastas
+          mkdir -p build/android
+          echo "=== export_presets (trecho) ==="
+          head -40 export_presets.cfg
 
       - name: Exportar APK
         working-directory: Amazon_Frontline
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_HOME }}
         run: |
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          echo "ANDROID_HOME=$ANDROID_HOME"
           mkdir -p build/android
-          ../godot/godot --headless --path . --export-debug "Android" build/android/AmazonFrontline.apk 2>&1 | tee export.log || true
+          # tenta export debug
+          ../godot/godot --headless --verbose --path . --export-debug "Android" "$(pwd)/build/android/AmazonFrontline.apk" 2>&1 | tee export.log || true
+          echo "==== arquivos em build/android ===="
           ls -la build/android/ || true
+          echo "==== ultimas 80 linhas do log ===="
+          tail -80 export.log || true
           if [ ! -f build/android/AmazonFrontline.apk ]; then
             echo "APK nao gerado" > build/android/BUILD_NOTES.txt
-            cp export.log build/android/ 2>/dev/null || true
-            cat export.log || true
+            cp export.log build/android/
+            # tambem sobe o project para diagnostico
+            cp export_presets.cfg build/android/ || true
           fi
 
       - name: Upload artefato
