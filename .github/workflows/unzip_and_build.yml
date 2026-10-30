@@ -21,7 +21,6 @@ jobs:
         run: |
           unzip -o Amazon_Frontline_Complete.zip
           test -d Amazon_Frontline
-          ls Amazon_Frontline | head
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -39,8 +38,6 @@ jobs:
           mkdir -p "$ANDROID_HOME/licenses"
           echo -e "\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > "$ANDROID_HOME/licenses/android-sdk-license"
           echo -e "\n84831b9409646a918e30573bab4c9c91346d8abd" > "$ANDROID_HOME/licenses/android-sdk-preview-license"
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          ls "$ANDROID_HOME" | head
 
       - name: Download Godot 4.3 + templates
         run: |
@@ -51,18 +48,21 @@ jobs:
           BIN=$(find . -maxdepth 1 -type f -name "Godot*" | head -1)
           mv "$BIN" godot
           chmod +x godot
-          ./godot --version || true
           curl -fsSL -o templates.tpz https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz
           mkdir -p "$HOME/.local/share/godot/export_templates/4.3.stable"
           unzip -o templates.tpz -d /tmp/godot_tpl
           cp -r /tmp/godot_tpl/templates/* "$HOME/.local/share/godot/export_templates/4.3.stable/"
-          echo "=== Templates instalados ==="
-          ls -la "$HOME/.local/share/godot/export_templates/4.3.stable/"
+          ls "$HOME/.local/share/godot/export_templates/4.3.stable/" | head
 
-      - name: Configurar Godot + preset Android
+      - name: Corrigir projeto para export
         run: |
+          # keystore debug
+          keytool -genkeypair -v -keystore debug.keystore \
+            -storepass android -alias androiddebugkey -keypass android \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
           mkdir -p "$HOME/.config/godot"
-          # settings do editor
           cat > "$HOME/.config/godot/editor_settings-4.3.tres" << EOF
           [gd_resource type="EditorSettings" format=3]
           [resource]
@@ -73,42 +73,48 @@ jobs:
           EOF
           cp "$HOME/.config/godot/editor_settings-4.3.tres" "$HOME/.config/godot/editor_settings-4.tres" || true
 
-          # keystore
-          keytool -genkeypair -v -keystore debug.keystore \
-            -storepass android -alias androiddebugkey -keypass android \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname "CN=Android Debug,O=Android,C=US"
-
-          # Ajustar export_presets: desligar gradle (mais simples no CI) e apontar keystore
           cd Amazon_Frontline
-          sed -i 's|gradle_build/use_gradle_build=true|gradle_build/use_gradle_build=false|g' export_presets.cfg || true
-          sed -i 's|export_path="build/android/AmazonFrontline.apk"|export_path="build/android/AmazonFrontline.apk"|g' export_presets.cfg || true
-          # garantir pastas
+
+          # 1) Desligar Gradle e REMOVER min/target SDK (causa do erro)
+          sed -i 's|gradle_build/use_gradle_build=true|gradle_build/use_gradle_build=false|g' export_presets.cfg
+          sed -i '/gradle_build\/min_sdk/d' export_presets.cfg
+          sed -i '/gradle_build\/target_sdk/d' export_presets.cfg
+
+          # 2) Remover icone corrompido
+          rm -f assets/ui/icon.png
+          sed -i '/config\/icon=/d' project.godot || true
+
+          # 3) Criar PNG minimo valido (1x1 pixel)
+          mkdir -p assets/ui
+          python3 - << 'PY'
+          import struct, zlib
+          def chunk(tag, data):
+              return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff)
+          raw = b"\x00" + b"\x00\xff\x00"  # filter + RGB green
+          ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+          png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+          open("assets/ui/icon.png", "wb").write(png)
+          print("icon.png ok", len(png))
+          PY
+
           mkdir -p build/android
-          echo "=== export_presets (trecho) ==="
-          head -40 export_presets.cfg
+          echo "=== preset Android (primeiras linhas) ==="
+          head -50 export_presets.cfg
 
       - name: Exportar APK
         working-directory: Amazon_Frontline
-        env:
-          ANDROID_HOME: ${{ env.ANDROID_HOME }}
-          ANDROID_SDK_ROOT: ${{ env.ANDROID_HOME }}
         run: |
           export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           export ANDROID_SDK_ROOT="$ANDROID_HOME"
-          echo "ANDROID_HOME=$ANDROID_HOME"
           mkdir -p build/android
-          # tenta export debug
-          ../godot/godot --headless --verbose --path . --export-debug "Android" "$(pwd)/build/android/AmazonFrontline.apk" 2>&1 | tee export.log || true
-          echo "==== arquivos em build/android ===="
+          ../godot/godot --headless --path . --export-debug "Android" "$(pwd)/build/android/AmazonFrontline.apk" 2>&1 | tee export.log || true
+          echo "==== build/android ===="
           ls -la build/android/ || true
-          echo "==== ultimas 80 linhas do log ===="
-          tail -80 export.log || true
+          echo "==== tail log ===="
+          tail -60 export.log || true
           if [ ! -f build/android/AmazonFrontline.apk ]; then
             echo "APK nao gerado" > build/android/BUILD_NOTES.txt
             cp export.log build/android/
-            # tambem sobe o project para diagnostico
-            cp export_presets.cfg build/android/ || true
           fi
 
       - name: Upload artefato
